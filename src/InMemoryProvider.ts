@@ -362,38 +362,62 @@ class InMemoryIndex extends FullTextSearchHelpers.DbIndexFTSFromRangeQueries {
             return SyncTasks.Rejected('InMemoryTransaction already closed');
         }
 
-        let data: _.Dictionary<ItemType[]>|_.Dictionary<ItemType>;
-        let sortedKeys: string[];
+        let indexTree: any;
+        let keyLow: string; 
+        let keyHigh: string;
         const err = _.attempt(() => {
-            data = this._calcChunkedData();
-            sortedKeys = this._getKeysForRange(data, keyLowRange, keyHighRange, lowRangeExclusive, highRangeExclusive).sort();
+            indexTree = this._buildIndexTree();
+            ({ keyLow, keyHigh } = this._getKeysForRange(indexTree, keyLowRange, keyHighRange, lowRangeExclusive, highRangeExclusive));
         });
         if (err) {
             return SyncTasks.Rejected(err);
         }
 
-        return this._returnResultsFromKeys(data!!!, sortedKeys!!!, reverseOrSortOrder, limit, offset);
+        return this._returnResultsFromIndexTree(indexTree!!!, keyLow!!!, keyHigh!!!, reverseOrSortOrder, limit, offset);
+    }
+
+    private _getKeysForRange(
+        indexTree: any,
+        keyLowRange: KeyType,
+        keyHighRange: KeyType,
+        lowRangeExclusive?: boolean,
+        highRangeExclusive?: boolean
+    ): { keyLow: string, keyHigh: string } {
+        let keyLow = NoSqlProviderUtils.serializeKeyToString(keyLowRange, this._keyPath);
+        let keyHigh = NoSqlProviderUtils.serializeKeyToString(keyHighRange, this._keyPath);
+
+        // make sure to handle the exclusive bounds case
+        keyLow = lowRangeExclusive ? indexTree.lt(keyLow).key : keyLow;
+        keyHigh = highRangeExclusive ? indexTree.gt(keyHigh).key : keyHigh;
+
+        return { keyLow, keyHigh };
     }
 
     // Warning: This function can throw, make sure to trap.
-    private _getKeysForRange(data: _.Dictionary<ItemType[]>|_.Dictionary<ItemType>, keyLowRange: KeyType, keyHighRange: KeyType,
-            lowRangeExclusive?: boolean, highRangeExclusive?: boolean): string[] {
-        const keyLow = NoSqlProviderUtils.serializeKeyToString(keyLowRange, this._keyPath);
-        const keyHigh = NoSqlProviderUtils.serializeKeyToString(keyHighRange, this._keyPath);
-        return _.filter(_.keys(data), key =>
-            (key > keyLow || (key === keyLow && !lowRangeExclusive)) && (key < keyHigh || (key === keyHigh && !highRangeExclusive)));
-    }
+    // private _getKeysForRange(data: _.Dictionary<ItemType[]>|_.Dictionary<ItemType>, keyLowRange: KeyType, keyHighRange: KeyType,
+    //         lowRangeExclusive?: boolean, highRangeExclusive?: boolean): string[] {
+    //     const keyLow = NoSqlProviderUtils.serializeKeyToString(keyLowRange, this._keyPath);
+    //     const keyHigh = NoSqlProviderUtils.serializeKeyToString(keyHighRange, this._keyPath);
+    //     return _.filter(_.keys(data), key =>
+    //         (key > keyLow || (key === keyLow && !lowRangeExclusive)) && (key < keyHigh || (key === keyHigh && !highRangeExclusive)));
+    // }
 
     // TODO jepoisso - see if we can merge in one function
-    private static _bidirectionalNext(itt: any, reverse: any) {
+    private _bidirectionalNext(itt: any, reverse: any) {
         return !reverse ? itt.next() : itt.prev();
     }
 
-    private static _bidirectionalHasNext(itt: any, reverse: any) {
+    private _bidirectionalHasNext(itt: any, reverse: any) {
         return !reverse ? itt.hasNext : itt.hasPrev;
     }
 
-    private _returnResultsFromIndexTree(tree: any, firstKey: string, lastKey: string, reverse?: boolean | NoSqlProvider.QuerySortOrder, limit?: number, offset?: number) {
+    private _returnResultsFromIndexTree(tree: any, 
+        firstKey: string, 
+        lastKey: string, 
+        reverse?: boolean | NoSqlProvider.QuerySortOrder, 
+        limit?: number, 
+        offset?: number
+    ) {
         offset = offset || 0;
         limit = limit || 0;
 
@@ -401,45 +425,27 @@ class InMemoryIndex extends FullTextSearchHelpers.DbIndexFTSFromRangeQueries {
         // TODO jepoisso: check for null case
         let keyItt = !reverse ? tree.find(firstKey) : tree.find(lastKey);
         let currOffset = 0;
-        while (keyItt && InMemoryIndex._bidirectionalHasNext(keyItt, reverse)) {
+        while (keyItt && this._bidirectionalHasNext(keyItt, reverse)) {
             if (currOffset++ >= offset && results.length <= limit) {
                 results.push(keyItt.value);
             }
-            keyItt = InMemoryIndex._bidirectionalNext(keyItt, reverse);
+            keyItt = this._bidirectionalNext(keyItt, reverse);
         } 
 
         return SyncTasks.Resolved(results);
     }
 
-    // private _returnResultsFromKeys(data: _.Dictionary<ItemType[]> | _.Dictionary<ItemType>, sortedKeys: string[],
-    //         reverseOrSortOrder?: boolean | NoSqlProvider.QuerySortOrder, limit?: number, offset?: number) {
-    //     if (reverseOrSortOrder === true || reverseOrSortOrder === NoSqlProvider.QuerySortOrder.Reverse) {
-    //         sortedKeys = _.reverse(sortedKeys);
-    //     }
-
-    //     if (offset) {
-    //         sortedKeys = sortedKeys.slice(offset);
-    //     }
-
-    //     if (limit) {
-    //         sortedKeys = sortedKeys.slice(0, limit);
-    //     }
-
-    //     let results = _.map(sortedKeys, key => data[key]);
-    //     return SyncTasks.Resolved(_.flatten(results));
-    // }
-
     countAll(): SyncTasks.Promise<number> {
         if (!this._trans.internal_isOpen()) {
             return SyncTasks.Rejected('InMemoryTransaction already closed');
         }
-        const data = _.attempt(() => {
-            return this._calcChunkedData();
+        const indexTree = _.attempt(() => {
+            return this._buildIndexTree();
         });
-        if (_.isError(data)) {
-            return SyncTasks.Rejected(data);
+        if (_.isError(indexTree)) {
+            return SyncTasks.Rejected(indexTree);
         }
-        return SyncTasks.Resolved(_.keys(data).length);
+        return SyncTasks.Resolved(indexTree.keys.length);
     }
 
     countOnly(key: KeyType): SyncTasks.Promise<number> {
@@ -452,14 +458,16 @@ class InMemoryIndex extends FullTextSearchHelpers.DbIndexFTSFromRangeQueries {
             return SyncTasks.Rejected('InMemoryTransaction already closed');
         }
 
+        let indexTree: any;
         const keys = _.attempt(() => {
-            const data = this._calcChunkedData();
-            return this._getKeysForRange(data, keyLowRange, keyHighRange, lowRangeExclusive, highRangeExclusive);
+            indexTree = this._buildIndexTree();
+            return this._getKeysForRange(indexTree, keyLowRange, keyHighRange, lowRangeExclusive, highRangeExclusive);
         });
         if (_.isError(keys)) {
             return SyncTasks.Rejected(keys);
         }
-
-        return SyncTasks.Resolved(keys.length);
+        // TODO jepoisso - dont be lazy and iterate through pls
+        const results = this._returnResultsFromIndexTree(indexTree, keys.keyLow, keys.keyHigh, false);  
+        return results.then(res => res.length);
     }
 }
