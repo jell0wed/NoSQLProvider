@@ -297,45 +297,6 @@ class InMemoryIndex extends FullTextSearchHelpers.DbIndexFTSFromRangeQueries {
         });
     }
 
-    // // Warning: This function can throw, make sure to trap.
-    // private _calcChunkedData(): _.Dictionary<ItemType[]>|_.Dictionary<ItemType> {
-    //     if (!this._indexSchema) {
-    //         // Primary key -- use data intact
-    //         return this._mergedData;
-    //     }
-
-    //     // If it's not the PK index, re-pivot the data to be keyed off the key value built from the keypath
-    //     let data: _.Dictionary<ItemType[]> = {};
-    //     _.each(this._mergedData, item => {
-    //         // Each item may be non-unique so store as an array of items for each key
-    //         let keys: string[];
-    //         if (this._indexSchema!!!.fullText) {
-    //             keys = _.map(FullTextSearchHelpers.getFullTextIndexWordsForItem(<string>this._keyPath, item), val =>
-    //                 NoSqlProviderUtils.serializeKeyToString(val, <string>this._keyPath));
-    //         } else if (this._indexSchema!!!.multiEntry) {
-    //             // Have to extract the multiple entries into this alternate table...
-    //             const valsRaw = NoSqlProviderUtils.getValueForSingleKeypath(item, <string>this._keyPath);
-    //             if (valsRaw) {
-    //                 keys = _.map(NoSqlProviderUtils.arrayify(valsRaw), val =>
-    //                     NoSqlProviderUtils.serializeKeyToString(val, <string>this._keyPath));
-    //             } else {
-    //                 keys = [];
-    //             }
-    //         } else {
-    //             keys = [NoSqlProviderUtils.getSerializedKeyForKeypath(item, this._keyPath)!!!];
-    //         }
-
-    //         for (const key of keys) {
-    //             if (!data[key]) {
-    //                 data[key] = [item];
-    //             } else {
-    //                 data[key].push(item);
-    //             }
-    //         }
-    //     });
-    //     return data;
-    // }
-
     getAll(reverseOrSortOrder?: boolean | NoSqlProvider.QuerySortOrder, limit?: number, offset?: number): SyncTasks.Promise<ItemType[]> {
         if (!this._trans.internal_isOpen()) {
             return SyncTasks.Rejected('InMemoryTransaction already closed');
@@ -392,15 +353,6 @@ class InMemoryIndex extends FullTextSearchHelpers.DbIndexFTSFromRangeQueries {
 
         return { keyLow, keyHigh };
     }
-
-    // Warning: This function can throw, make sure to trap.
-    // private _getKeysForRange(data: _.Dictionary<ItemType[]>|_.Dictionary<ItemType>, keyLowRange: KeyType, keyHighRange: KeyType,
-    //         lowRangeExclusive?: boolean, highRangeExclusive?: boolean): string[] {
-    //     const keyLow = NoSqlProviderUtils.serializeKeyToString(keyLowRange, this._keyPath);
-    //     const keyHigh = NoSqlProviderUtils.serializeKeyToString(keyHighRange, this._keyPath);
-    //     return _.filter(_.keys(data), key =>
-    //         (key > keyLow || (key === keyLow && !lowRangeExclusive)) && (key < keyHigh || (key === keyHigh && !highRangeExclusive)));
-    // }
 
     // TODO jepoisso - see if we can merge in one function
     private _bidirectionalNext(itt: any, reverse: any) {
