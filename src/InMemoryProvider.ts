@@ -8,6 +8,7 @@
 
 import _ = require('lodash');
 import SyncTasks = require('synctasks');
+import createTree = require('functional-red-black-tree');
 
 import FullTextSearchHelpers = require('./FullTextSearchHelpers');
 import NoSqlProvider = require('./NoSqlProvider');
@@ -266,17 +267,13 @@ class InMemoryIndex extends FullTextSearchHelpers.DbIndexFTSFromRangeQueries {
         super(indexSchema, primaryKeyPath);
     }
 
-    // Warning: This function can throw, make sure to trap.
-    private _calcChunkedData(): _.Dictionary<ItemType[]>|_.Dictionary<ItemType> {
+    private _buildIndexTree(): any {
         if (!this._indexSchema) {
-            // Primary key -- use data intact
             return this._mergedData;
         }
 
-        // If it's not the PK index, re-pivot the data to be keyed off the key value built from the keypath
-        let data: _.Dictionary<ItemType[]> = {};
+        let tree: any;
         _.each(this._mergedData, item => {
-            // Each item may be non-unique so store as an array of items for each key
             let keys: string[];
             if (this._indexSchema!!!.fullText) {
                 keys = _.map(FullTextSearchHelpers.getFullTextIndexWordsForItem(<string>this._keyPath, item), val =>
@@ -294,31 +291,64 @@ class InMemoryIndex extends FullTextSearchHelpers.DbIndexFTSFromRangeQueries {
                 keys = [NoSqlProviderUtils.getSerializedKeyForKeypath(item, this._keyPath)!!!];
             }
 
-            for (const key of keys) {
-                if (!data[key]) {
-                    data[key] = [item];
-                } else {
-                    data[key].push(item);
-                }
+            for (const key of keys) { // todo: handle the case where the key is already in the tree
+                tree.insert(key, item);
             }
         });
-        return data;
     }
+
+    // // Warning: This function can throw, make sure to trap.
+    // private _calcChunkedData(): _.Dictionary<ItemType[]>|_.Dictionary<ItemType> {
+    //     if (!this._indexSchema) {
+    //         // Primary key -- use data intact
+    //         return this._mergedData;
+    //     }
+
+    //     // If it's not the PK index, re-pivot the data to be keyed off the key value built from the keypath
+    //     let data: _.Dictionary<ItemType[]> = {};
+    //     _.each(this._mergedData, item => {
+    //         // Each item may be non-unique so store as an array of items for each key
+    //         let keys: string[];
+    //         if (this._indexSchema!!!.fullText) {
+    //             keys = _.map(FullTextSearchHelpers.getFullTextIndexWordsForItem(<string>this._keyPath, item), val =>
+    //                 NoSqlProviderUtils.serializeKeyToString(val, <string>this._keyPath));
+    //         } else if (this._indexSchema!!!.multiEntry) {
+    //             // Have to extract the multiple entries into this alternate table...
+    //             const valsRaw = NoSqlProviderUtils.getValueForSingleKeypath(item, <string>this._keyPath);
+    //             if (valsRaw) {
+    //                 keys = _.map(NoSqlProviderUtils.arrayify(valsRaw), val =>
+    //                     NoSqlProviderUtils.serializeKeyToString(val, <string>this._keyPath));
+    //             } else {
+    //                 keys = [];
+    //             }
+    //         } else {
+    //             keys = [NoSqlProviderUtils.getSerializedKeyForKeypath(item, this._keyPath)!!!];
+    //         }
+
+    //         for (const key of keys) {
+    //             if (!data[key]) {
+    //                 data[key] = [item];
+    //             } else {
+    //                 data[key].push(item);
+    //             }
+    //         }
+    //     });
+    //     return data;
+    // }
 
     getAll(reverseOrSortOrder?: boolean | NoSqlProvider.QuerySortOrder, limit?: number, offset?: number): SyncTasks.Promise<ItemType[]> {
         if (!this._trans.internal_isOpen()) {
             return SyncTasks.Rejected('InMemoryTransaction already closed');
         }
 
-        const data = _.attempt(() => {
-            return this._calcChunkedData();
+        const indexTree = _.attempt(() => {
+            return this._buildIndexTree();
         });
-        if (_.isError(data)) {
-            return SyncTasks.Rejected(data);
+        if (_.isError(indexTree)) {
+            return SyncTasks.Rejected(indexTree);
         }
 
-        const sortedKeys = _.keys(data).sort();
-        return this._returnResultsFromKeys(data, sortedKeys, reverseOrSortOrder, limit, offset);
+        return this._returnResultsFromIndexTree(indexTree, indexTree.begin.key, indexTree.end.key, reverseOrSortOrder, limit, offset);
     }
 
     getOnly(key: KeyType, reverseOrSortOrder?: boolean | NoSqlProvider.QuerySortOrder, limit?: number, offset?: number)
@@ -354,23 +384,50 @@ class InMemoryIndex extends FullTextSearchHelpers.DbIndexFTSFromRangeQueries {
             (key > keyLow || (key === keyLow && !lowRangeExclusive)) && (key < keyHigh || (key === keyHigh && !highRangeExclusive)));
     }
 
-    private _returnResultsFromKeys(data: _.Dictionary<ItemType[]> | _.Dictionary<ItemType>, sortedKeys: string[],
-            reverseOrSortOrder?: boolean | NoSqlProvider.QuerySortOrder, limit?: number, offset?: number) {
-        if (reverseOrSortOrder === true || reverseOrSortOrder === NoSqlProvider.QuerySortOrder.Reverse) {
-            sortedKeys = _.reverse(sortedKeys);
-        }
-
-        if (offset) {
-            sortedKeys = sortedKeys.slice(offset);
-        }
-
-        if (limit) {
-            sortedKeys = sortedKeys.slice(0, limit);
-        }
-
-        let results = _.map(sortedKeys, key => data[key]);
-        return SyncTasks.Resolved(_.flatten(results));
+    // TODO jepoisso - see if we can merge in one function
+    private static _bidirectionalNext(itt: any, reverse: any) {
+        return !reverse ? itt.next() : itt.prev();
     }
+
+    private static _bidirectionalHasNext(itt: any, reverse: any) {
+        return !reverse ? itt.hasNext : itt.hasPrev;
+    }
+
+    private _returnResultsFromIndexTree(tree: any, firstKey: string, lastKey: string, reverse?: boolean | NoSqlProvider.QuerySortOrder, limit?: number, offset?: number) {
+        offset = offset || 0;
+        limit = limit || 0;
+
+        const results = [];
+        // TODO jepoisso: check for null case
+        let keyItt = !reverse ? tree.find(firstKey) : tree.find(lastKey);
+        let currOffset = 0;
+        while (keyItt && InMemoryIndex._bidirectionalHasNext(keyItt, reverse)) {
+            if (currOffset++ >= offset && results.length <= limit) {
+                results.push(keyItt.value);
+            }
+            keyItt = InMemoryIndex._bidirectionalNext(keyItt, reverse);
+        } 
+
+        return SyncTasks.Resolved(results);
+    }
+
+    // private _returnResultsFromKeys(data: _.Dictionary<ItemType[]> | _.Dictionary<ItemType>, sortedKeys: string[],
+    //         reverseOrSortOrder?: boolean | NoSqlProvider.QuerySortOrder, limit?: number, offset?: number) {
+    //     if (reverseOrSortOrder === true || reverseOrSortOrder === NoSqlProvider.QuerySortOrder.Reverse) {
+    //         sortedKeys = _.reverse(sortedKeys);
+    //     }
+
+    //     if (offset) {
+    //         sortedKeys = sortedKeys.slice(offset);
+    //     }
+
+    //     if (limit) {
+    //         sortedKeys = sortedKeys.slice(0, limit);
+    //     }
+
+    //     let results = _.map(sortedKeys, key => data[key]);
+    //     return SyncTasks.Resolved(_.flatten(results));
+    // }
 
     countAll(): SyncTasks.Promise<number> {
         if (!this._trans.internal_isOpen()) {
